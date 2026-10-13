@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+secrets/
+.venv/
+.audit-venv/
+.audit-state/
+.backups/
+.langchain-venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+chat_histories/
+chroma_db/
+md5.text

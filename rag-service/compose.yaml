@@ -1,0 +1,85 @@
+services:
+  postgres:
+    image: ${PGVECTOR_IMAGE:-pgvector/pgvector:0.8.1-pg17}
+    environment:
+      POSTGRES_DB: rag
+      POSTGRES_USER: rag_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [rag_postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U rag_admin -d rag]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    build: &rag_build
+      context: .
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
+    command: [python, -m, enterprise.bootstrap]
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
+      DATABASE_ADMIN_URL_FILE: /run/secrets/database_admin_url
+      DATABASE_APP_PASSWORD_FILE: /run/secrets/database_app_password
+      MODEL_API_KEY_FILE: /run/secrets/model_api_key
+      AUTH_PRINCIPALS_FILE: /run/secrets/principals
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
+    secrets: [database_url, database_admin_url, database_app_password, model_api_key, principals]
+    depends_on:
+      postgres: {condition: service_healthy}
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+  api:
+    build: *rag_build
+    environment: &rag_environment
+      DATABASE_URL_FILE: /run/secrets/database_url
+      MODEL_API_KEY_FILE: /run/secrets/model_api_key
+      AUTH_PRINCIPALS_FILE: /run/secrets/principals
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      CHAT_MODEL: ${CHAT_MODEL:-qwen-plus}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
+      MAX_COSINE_DISTANCE: ${MAX_COSINE_DISTANCE:-0.45}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    secrets: [database_url, model_api_key, principals]
+    ports: [127.0.0.1:8000:8000]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    mem_limit: 512m
+    pids_limit: 128
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    restart: unless-stopped
+  worker:
+    build: *rag_build
+    command: [python, -m, enterprise.worker]
+    environment: *rag_environment
+    secrets: [database_url, model_api_key, principals]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    read_only: true
+    mem_limit: 512m
+    pids_limit: 64
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    restart: unless-stopped
+secrets:
+  postgres_password: {file: ./secrets/postgres_password.txt}
+  database_url: {file: ./secrets/database_url.txt}
+  database_admin_url: {file: ./secrets/database_admin_url.txt}
+  database_app_password: {file: ./secrets/database_app_password.txt}
+  model_api_key: {file: ./secrets/model_api_key.txt}
+  principals: {file: ./secrets/principals.json}
+volumes:
+  rag_postgres:
