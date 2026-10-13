@@ -1,0 +1,177 @@
+name: robot-assistant
+
+x-rag-environment: &rag-environment
+  DATABASE_URL_FILE: /run/secrets/app_database_url
+  AUTH_PRINCIPALS_FILE: /run/secrets/principals.json
+  MODEL_API_KEY_FILE: /run/secrets/model_api_key
+  MODEL_BASE_URL: ${MODEL_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+  CHAT_MODEL: ${CHAT_MODEL:-qwen-plus}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
+  EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
+  MAX_COSINE_DISTANCE: ${MAX_COSINE_DISTANCE:-0.45}
+  CORS_ORIGINS: ${CORS_ORIGINS:-}
+
+x-rag-secrets: &rag-secrets
+  - source: principals
+    target: principals.json
+  - app_database_url
+  - model_api_key
+
+x-runtime: &runtime
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=32m
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  postgres:
+    image: ${PGVECTOR_IMAGE:-pgvector/pgvector:0.8.1-pg17}
+    environment:
+      POSTGRES_DB: rag
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes:
+      - rag-data:/var/lib/postgresql/data
+    networks: [data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U rag -d rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  migrate:
+    <<: *runtime
+    build:
+      context: "../rag-service"
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
+    environment:
+      <<: *rag-environment
+      DATABASE_ADMIN_URL_FILE: /run/secrets/migration_database_url
+      DATABASE_APP_PASSWORD_FILE: /run/secrets/app_database_password
+    secrets:
+      - source: principals
+        target: principals.json
+      - migration_database_url
+      - app_database_url
+      - app_database_password
+      - model_api_key
+    command: [python, -m, enterprise.bootstrap]
+    networks: [data]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  rag:
+    <<: *runtime
+    build:
+      context: "../rag-service"
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
+    environment: *rag-environment
+    secrets: *rag-secrets
+    command: [uvicorn, "enterprise.api:app", --host, "0.0.0.0", --port, "8000", --no-access-log]
+    networks: [data, services]
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  worker:
+    <<: *runtime
+    build:
+      context: "../rag-service"
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
+    environment: *rag-environment
+    secrets: *rag-secrets
+    command: [python, -m, enterprise.worker]
+    networks: [data, services]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    # The worker has no HTTP listener; monitor process and queue age separately.
+    healthcheck:
+      disable: true
+
+  agent:
+    <<: *runtime
+    build:
+      context: .
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
+    environment:
+      AUTH_PRINCIPALS_FILE: /run/secrets/principals.json
+      RAG_BASE_URL: http://rag:8000
+      ALLOW_INTERNAL_HTTP: "true"
+      ALLOW_MODEL_HTTP: ${ALLOW_MODEL_HTTP:-false}
+      REPORTS_ENABLED: ${REPORTS_ENABLED:-false}
+      ASSISTANT_ENABLED: ${ASSISTANT_ENABLED:-false}
+      USAGE_API_BASE_URL: ${USAGE_API_BASE_URL:-https://usage.example.internal}
+      USAGE_API_TOKEN_FILE: /run/secrets/usage_api_token
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      MODEL_API_KEY_FILE: /run/secrets/model_api_key
+      MODEL_NAME: ${MODEL_NAME:-qwen-plus}
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-120}
+      UPSTREAM_TIMEOUT_SECONDS: ${UPSTREAM_TIMEOUT_SECONDS:-110}
+      MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS:-16}
+      REQUESTS_PER_MINUTE: ${REQUESTS_PER_MINUTE:-30}
+      MODEL_MAX_TOKENS: ${MODEL_MAX_TOKENS:-800}
+    secrets:
+      - source: principals
+        target: principals.json
+      - model_api_key
+      - usage_api_token
+    networks: [services]
+    ports:
+      - "127.0.0.1:8001:8001"
+    depends_on:
+      rag:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  data:
+    internal: true
+  services: {}
+
+volumes:
+  rag-data: {}
+
+secrets:
+  principals:
+    file: ./secrets/principals.json
+  postgres_password:
+    file: ./secrets/postgres_password
+  migration_database_url:
+    file: ./secrets/migration_database_url
+  app_database_url:
+    file: ./secrets/app_database_url
+  app_database_password:
+    file: ./secrets/app_database_password
+  model_api_key:
+    file: ./secrets/model_api_key
+  usage_api_token:
+    file: ./secrets/usage_api_token

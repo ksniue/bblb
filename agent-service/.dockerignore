@@ -1,0 +1,7 @@
+**
+!service/
+!service/**
+!requirements.txt
+!constraints.txt
+!Dockerfile
+.backups/

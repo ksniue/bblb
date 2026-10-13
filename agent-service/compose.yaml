@@ -1,0 +1,32 @@
+services:
+  agent:
+    build:
+      context: .
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
+    ports:
+      - "127.0.0.1:8001:8001"
+    env_file: .env
+    secrets:
+      - source: principals
+        target: principals.json
+      - model_api_key
+      - usage_api_token
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+secrets:
+  principals:
+    file: ./secrets/principals.json
+  model_api_key:
+    file: ./secrets/model_api_key
+  usage_api_token:
+    file: ./secrets/usage_api_token
